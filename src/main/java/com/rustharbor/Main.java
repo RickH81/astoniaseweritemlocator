@@ -33,10 +33,8 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 public class Main {
@@ -321,8 +319,29 @@ public class Main {
             drawSearchBounds(g2);
             drawEntries(g2);
             drawCardinalLabels(g2);
+            drawAttribution(g2);
 
             g2.dispose();
+        }
+
+        private void drawAttribution(Graphics2D g2) {
+            Rectangle anchor;
+            if (scrollPane != null) {
+                anchor = scrollPane.getViewport().getViewRect();
+            } else {
+                anchor = new Rectangle(0, 0, getWidth(), getHeight());
+            }
+
+            int x = anchor.x + 10;
+            int y = anchor.y + 18;
+
+            g2.setColor(new Color(0, 0, 0, 150));
+            g2.fillRoundRect(x - 6, y - 14, 240, 54, 8, 8);
+
+            g2.setColor(new Color(255, 255, 255, 235));
+            g2.drawString("Created by: Vozziks", x, y);
+            g2.drawString("Last updated: March 2, 2026", x, y + 16);
+            g2.drawString("Version 1.0", x, y + 32);
         }
 
         private void drawRotatedMap(Graphics2D g2) {
@@ -474,11 +493,6 @@ public class Main {
         }
 
         private BufferedImage loadMapImage() {
-            BufferedImage fromDisk = loadFromKnownDiskLocations();
-            if (fromDisk != null) {
-                return fromDisk;
-            }
-
             try (InputStream input = Main.class.getResourceAsStream("/sewer_map.png")) {
                 if (input != null) {
                     return ImageIO.read(input);
@@ -486,39 +500,11 @@ public class Main {
             } catch (IOException ex) {
             }
 
-            return null;
-        }
-
-        private BufferedImage loadFromKnownDiskLocations() {
-            List<File> candidates = new ArrayList<>(Arrays.asList(
-                    new File("src/main/java/com/rustharbor/sewer_map.png"),
-                    new File("seweritemlocator/src/main/java/com/rustharbor/sewer_map.png"),
-                    new File("sewer_map.png"),
-                    new File(System.getProperty("user.home"), "sewer_map.png")
-            ));
-
-            try {
-                URI location = Main.class.getProtectionDomain().getCodeSource().getLocation().toURI();
-                File codeSourceDir = new File(location);
-                candidates.add(new File(codeSourceDir, "com/rustharbor/sewer_map.png"));
-                File parent = codeSourceDir.getParentFile();
-                if (parent != null) {
-                    candidates.add(new File(parent, "src/main/java/com/rustharbor/sewer_map.png"));
+            try (InputStream input = Main.class.getResourceAsStream("sewer_map.png")) {
+                if (input != null) {
+                    return ImageIO.read(input);
                 }
-            } catch (Exception ignored) {
-            }
-
-            for (File candidate : candidates) {
-                if (!candidate.exists() || !candidate.isFile()) {
-                    continue;
-                }
-                try {
-                    BufferedImage loaded = ImageIO.read(candidate);
-                    if (loaded != null) {
-                        return loaded;
-                    }
-                } catch (IOException ignored) {
-                }
+            } catch (IOException ex) {
             }
 
             return null;
