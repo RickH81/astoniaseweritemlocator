@@ -24,6 +24,8 @@ import java.awt.Insets;
 import java.awt.Point;
 import java.awt.RenderingHints;
 import java.awt.Rectangle;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.AffineTransform;
@@ -33,15 +35,11 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
 public class Main {
-    private static SewerWorkbookCube.CubeData sewerCubeData;
-
     public static void main(String[] args) {
-        sewerCubeData = loadSewerWorkbookCube();
         SwingUtilities.invokeLater(() -> {
             JFrame frame = new JFrame("Sewer Item Locator");
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -61,27 +59,6 @@ public class Main {
             frame.setLocationRelativeTo(null);
             frame.setVisible(true);
         });
-    }
-
-    private static SewerWorkbookCube.CubeData loadSewerWorkbookCube() {
-        List<Path> candidates = List.of(
-                Path.of("src", "main", "java", "com", "rustharbor", "SEWERS.xlsx"),
-                Path.of("seweritemlocator", "src", "main", "java", "com", "rustharbor", "SEWERS.xlsx")
-        );
-
-        for (Path path : candidates) {
-            try {
-                SewerWorkbookCube.CubeData cube = SewerWorkbookCube.load(path);
-                int rows = cube.sheetCount() > 0 ? cube.rowCount(0) : 0;
-                int cols = cube.sheetCount() > 0 ? cube.columnCount(0) : 0;
-                System.out.println("Loaded SEWERS.xlsx cube: sheets=" + cube.sheetCount() + ", rows=" + rows + ", cols=" + cols);
-                return cube;
-            } catch (Exception ignored) {
-            }
-        }
-
-        System.out.println("SEWERS.xlsx not found or unreadable; using empty cube.");
-        return new SewerWorkbookCube.CubeData(new String[0], new String[0][][]);
     }
 
     private static JPanel buildControls(MapPanel mapPanel) {
@@ -205,6 +182,10 @@ public class Main {
         private JScrollPane scrollPane;
         private Point dragStartScreen;
         private Point dragStartViewPosition;
+        private int dragStartPanOffsetX;
+        private int dragStartPanOffsetY;
+        private int panOffsetX;
+        private int panOffsetY;
 
         private MapPanel() {
             setBackground(Color.BLACK);
@@ -214,16 +195,18 @@ public class Main {
             MouseAdapter dragToPan = new MouseAdapter() {
                 @Override
                 public void mousePressed(MouseEvent e) {
-                    if (scrollPane == null || zoom <= 1.0) {
+                    if (scrollPane == null) {
                         return;
                     }
                     dragStartScreen = e.getLocationOnScreen();
                     dragStartViewPosition = scrollPane.getViewport().getViewPosition();
+                    dragStartPanOffsetX = panOffsetX;
+                    dragStartPanOffsetY = panOffsetY;
                 }
 
                 @Override
                 public void mouseDragged(MouseEvent e) {
-                    if (scrollPane == null || zoom <= 1.0 || dragStartScreen == null || dragStartViewPosition == null) {
+                    if (scrollPane == null || dragStartScreen == null || dragStartViewPosition == null) {
                         return;
                     }
 
@@ -235,9 +218,27 @@ public class Main {
                     int maxX = Math.max(0, getWidth() - viewRect.width);
                     int maxY = Math.max(0, getHeight() - viewRect.height);
 
-                    int nextX = clamp(dragStartViewPosition.x - dx, 0, maxX);
-                    int nextY = clamp(dragStartViewPosition.y - dy, 0, maxY);
-                    scrollPane.getViewport().setViewPosition(new Point(nextX, nextY));
+                    if (maxX > 0 || maxY > 0) {
+                        int nextX = clamp(dragStartViewPosition.x - dx, 0, maxX);
+                        int nextY = clamp(dragStartViewPosition.y - dy, 0, maxY);
+                        scrollPane.getViewport().setViewPosition(new Point(nextX, nextY));
+                    }
+
+                    if (maxX == 0) {
+                        panOffsetX = clamp(dragStartPanOffsetX + dx, minPanOffsetX(), maxPanOffsetX());
+                    }
+                    if (maxY == 0) {
+                        panOffsetY = clamp(dragStartPanOffsetY + dy, minPanOffsetY(), maxPanOffsetY());
+                    }
+
+                    repaint();
+                }
+
+                @Override
+                public void mouseClicked(MouseEvent e) {
+                    if (e.getClickCount() == 2) {
+                        recenterView();
+                    }
                 }
 
                 @Override
@@ -249,10 +250,39 @@ public class Main {
 
             addMouseListener(dragToPan);
             addMouseMotionListener(dragToPan);
+            addMouseWheelListener(e -> {
+                Point anchor = e.getPoint();
+                int wheelTurns = e.getWheelRotation();
+
+                if (wheelTurns != 0) {
+                    int steps = Math.abs(wheelTurns);
+                    double stepFactor = wheelTurns < 0 ? 1.1 : (1.0 / 1.1);
+                    for (int i = 0; i < steps; i++) {
+                        setZoom(zoom * stepFactor, anchor);
+                    }
+                } else {
+                    double factor = Math.pow(1.1, -e.getPreciseWheelRotation());
+                    setZoom(zoom * factor, anchor);
+                }
+
+                e.consume();
+            });
         }
 
         private void attachScrollPane(JScrollPane pane) {
             this.scrollPane = pane;
+            pane.getViewport().addComponentListener(new ComponentAdapter() {
+                @Override
+                public void componentResized(ComponentEvent e) {
+                    updatePreferredSize();
+                    clampPanOffsets();
+                    revalidate();
+                    repaint();
+                }
+            });
+            updatePreferredSize();
+            clampPanOffsets();
+            revalidate();
         }
 
         private void zoomBy(double factor) {
@@ -260,28 +290,44 @@ public class Main {
         }
 
         private void setZoom(double nextZoom) {
+            setZoom(nextZoom, null);
+        }
+
+        private void setZoom(double nextZoom, Point anchorPoint) {
             double clamped = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
             if (Math.abs(clamped - zoom) < 0.0001) {
                 return;
             }
 
             Rectangle oldView = scrollPane != null ? scrollPane.getViewport().getViewRect() : null;
+            int oldWidth = Math.max(1, getWidth());
+            int oldHeight = Math.max(1, getHeight());
             double centerXRatio = 0.5;
             double centerYRatio = 0.5;
+            int anchorViewportX = oldView != null ? oldView.width / 2 : 0;
+            int anchorViewportY = oldView != null ? oldView.height / 2 : 0;
             if (oldView != null && getWidth() > 0 && getHeight() > 0) {
-                centerXRatio = (oldView.getCenterX()) / getWidth();
-                centerYRatio = (oldView.getCenterY()) / getHeight();
+                if (anchorPoint != null) {
+                    centerXRatio = anchorPoint.getX() / oldWidth;
+                    centerYRatio = anchorPoint.getY() / oldHeight;
+                    anchorViewportX = anchorPoint.x - oldView.x;
+                    anchorViewportY = anchorPoint.y - oldView.y;
+                } else {
+                    centerXRatio = (oldView.getCenterX()) / oldWidth;
+                    centerYRatio = (oldView.getCenterY()) / oldHeight;
+                }
             }
 
             zoom = clamped;
             updatePreferredSize();
+            clampPanOffsets();
             revalidate();
             repaint();
 
             if (scrollPane != null && oldView != null) {
                 Rectangle newView = scrollPane.getViewport().getViewRect();
-                int targetX = (int) Math.round(centerXRatio * getWidth() - (newView.width / 2.0));
-                int targetY = (int) Math.round(centerYRatio * getHeight() - (newView.height / 2.0));
+                int targetX = (int) Math.round(centerXRatio * getWidth() - anchorViewportX);
+                int targetY = (int) Math.round(centerYRatio * getHeight() - anchorViewportY);
                 int maxX = Math.max(0, getWidth() - newView.width);
                 int maxY = Math.max(0, getHeight() - newView.height);
                 scrollPane.getViewport().setViewPosition(new Point(
@@ -293,7 +339,14 @@ public class Main {
 
         private void updatePreferredSize() {
             int size = (int) Math.round(MAP_SIZE * zoom);
-            setPreferredSize(new Dimension(size, size));
+            int preferredWidth = size;
+            int preferredHeight = size;
+            if (scrollPane != null) {
+                Dimension viewportSize = scrollPane.getViewport().getExtentSize();
+                preferredWidth = Math.max(preferredWidth, viewportSize.width);
+                preferredHeight = Math.max(preferredHeight, viewportSize.height);
+            }
+            setPreferredSize(new Dimension(preferredWidth, preferredHeight));
         }
 
         private void addEntry(int x, int y, Direction direction) {
@@ -341,7 +394,7 @@ public class Main {
             g2.setColor(new Color(255, 255, 255, 235));
             g2.drawString("Created by: Vozziks", x, y);
             g2.drawString("Last updated: March 2, 2026", x, y + 16);
-            g2.drawString("Version 1.0", x, y + 32);
+            g2.drawString("Version 1.1", x, y + 32);
         }
 
         private void drawRotatedMap(Graphics2D g2) {
@@ -628,10 +681,53 @@ public class Main {
         }
 
         private Rectangle getMapRect() {
-            int size = Math.min(getWidth(), getHeight());
-            int left = (getWidth() - size) / 2;
-            int top = (getHeight() - size) / 2;
+            clampPanOffsets();
+            int size = (int) Math.round(MAP_SIZE * zoom);
+            int centeredLeft = (getWidth() - size) / 2;
+            int centeredTop = (getHeight() - size) / 2;
+            int left = clamp(centeredLeft + panOffsetX, 0, Math.max(0, getWidth() - size));
+            int top = clamp(centeredTop + panOffsetY, 0, Math.max(0, getHeight() - size));
             return new Rectangle(left, top, size, size);
+        }
+
+        private int minPanOffsetX() {
+            int slack = Math.max(0, getWidth() - (int) Math.round(MAP_SIZE * zoom));
+            return -slack / 2;
+        }
+
+        private int maxPanOffsetX() {
+            int slack = Math.max(0, getWidth() - (int) Math.round(MAP_SIZE * zoom));
+            return slack / 2;
+        }
+
+        private int minPanOffsetY() {
+            int slack = Math.max(0, getHeight() - (int) Math.round(MAP_SIZE * zoom));
+            return -slack / 2;
+        }
+
+        private int maxPanOffsetY() {
+            int slack = Math.max(0, getHeight() - (int) Math.round(MAP_SIZE * zoom));
+            return slack / 2;
+        }
+
+        private void clampPanOffsets() {
+            panOffsetX = clamp(panOffsetX, minPanOffsetX(), maxPanOffsetX());
+            panOffsetY = clamp(panOffsetY, minPanOffsetY(), maxPanOffsetY());
+        }
+
+        private void recenterView() {
+            panOffsetX = 0;
+            panOffsetY = 0;
+            clampPanOffsets();
+
+            if (scrollPane != null) {
+                Rectangle viewRect = scrollPane.getViewport().getViewRect();
+                int maxX = Math.max(0, getWidth() - viewRect.width);
+                int maxY = Math.max(0, getHeight() - viewRect.height);
+                scrollPane.getViewport().setViewPosition(new Point(maxX / 2, maxY / 2));
+            }
+
+            repaint();
         }
     }
 }
